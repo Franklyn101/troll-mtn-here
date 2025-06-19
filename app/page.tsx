@@ -11,21 +11,24 @@ import {
   AlertTriangle,
   Phone,
   MessageSquare,
-  RefreshCw,
+  Database,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
-
-interface Comment {
-  id: number
-  name: string
-  comment: string
-  timestamp: string
-  likes: number
-  createdAt: string
-}
+import { db, type Comment } from "@/lib/firebase"
+import {
+  collection,
+  addDoc,
+  onSnapshot,
+  orderBy,
+  query,
+  serverTimestamp,
+  doc,
+  updateDoc,
+  increment,
+} from "firebase/firestore"
 
 export default function MTNTrollSite() {
   const [signalStrength, setSignalStrength] = useState(0)
@@ -41,6 +44,7 @@ export default function MTNTrollSite() {
   const [showCommentGif, setShowCommentGif] = useState(false)
   const [isLoadingComments, setIsLoadingComments] = useState(true)
   const [isSubmittingComment, setIsSubmittingComment] = useState(false)
+  const [isConnected, setIsConnected] = useState(false)
 
   const disappointmentGifs = [
     "https://media.giphy.com/media/l2JehQ2GitHGdVG9y/giphy.gif",
@@ -51,51 +55,57 @@ export default function MTNTrollSite() {
 
   const [currentGif, setCurrentGif] = useState(disappointmentGifs[0])
 
-  // Load comments from API
-  const loadComments = async () => {
-    try {
-      setIsLoadingComments(true)
-      const response = await fetch("/api/comments", {
-        cache: "no-store", // Ensure we always get fresh data
-      })
-      if (response.ok) {
-        const data = await response.json()
-        setComments(data.comments)
-        console.log(`Loaded ${data.total} comments from server`)
-      } else {
-        console.error("Failed to load comments from server")
-        // Fallback to localStorage if API fails
-        const savedComments = localStorage.getItem("mtn-comments")
-        if (savedComments) {
-          const parsed = JSON.parse(savedComments)
-          setComments(parsed)
-          console.log(`Loaded ${parsed.length} comments from localStorage`)
-        }
-      }
-    } catch (error) {
-      console.error("Failed to load comments:", error)
-      // Fallback to localStorage if API fails
-      const savedComments = localStorage.getItem("mtn-comments")
-      if (savedComments) {
-        const parsed = JSON.parse(savedComments)
-        setComments(parsed)
-        console.log(`Loaded ${parsed.length} comments from localStorage`)
-      }
-    } finally {
-      setIsLoadingComments(false)
-    }
+  // Helper function to get time ago string
+  const getTimeAgo = (date: Date): string => {
+    const now = new Date()
+    const diffInMinutes = Math.floor((now.getTime() - date.getTime()) / (1000 * 60))
+
+    if (diffInMinutes < 1) return "Just now"
+    if (diffInMinutes < 60) return `${diffInMinutes} minute${diffInMinutes > 1 ? "s" : ""} ago`
+
+    const diffInHours = Math.floor(diffInMinutes / 60)
+    if (diffInHours < 24) return `${diffInHours} hour${diffInHours > 1 ? "s" : ""} ago`
+
+    const diffInDays = Math.floor(diffInHours / 24)
+    return `${diffInDays} day${diffInDays > 1 ? "s" : ""} ago`
   }
 
-  // Save comments to localStorage as backup
-  const saveCommentsToLocal = (commentsToSave: Comment[]) => {
-    localStorage.setItem("mtn-comments", JSON.stringify(commentsToSave))
-  }
-
+  // Set up real-time listener for comments
   useEffect(() => {
-    loadComments()
+    console.log("Setting up Firebase real-time listener...")
+
+    const q = query(collection(db, "comments"), orderBy("createdAt", "desc"))
+
+    const unsubscribe = onSnapshot(
+      q,
+      (querySnapshot) => {
+        const commentsData: Comment[] = []
+        querySnapshot.forEach((doc) => {
+          const data = doc.data()
+          commentsData.push({
+            id: doc.id,
+            name: data.name,
+            comment: data.comment,
+            likes: data.likes,
+            createdAt: data.createdAt?.toDate() || new Date(),
+            timestamp: data.createdAt ? getTimeAgo(data.createdAt.toDate()) : "Just now",
+          })
+        })
+
+        setComments(commentsData)
+        setIsLoadingComments(false)
+        setIsConnected(true)
+        console.log(`Real-time update: ${commentsData.length} comments loaded`)
+      },
+      (error) => {
+        console.error("Error listening to comments:", error)
+        setIsLoadingComments(false)
+        setIsConnected(false)
+      },
+    )
 
     // Simulate terrible signal strength with animation
-    const interval = setInterval(() => {
+    const signalInterval = setInterval(() => {
       setSignalStrength(Math.random() * 30) // Always terrible signal
     }, 2000)
 
@@ -110,7 +120,8 @@ export default function MTNTrollSite() {
     setTimeout(() => setIsLoading(false), 8000)
 
     return () => {
-      clearInterval(interval)
+      unsubscribe()
+      clearInterval(signalInterval)
       clearInterval(priceInterval)
     }
   }, [])
@@ -136,75 +147,46 @@ export default function MTNTrollSite() {
       setIsSubmittingComment(true)
 
       try {
-        const response = await fetch("/api/comments", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            name: userName.trim(),
-            comment: newComment.trim(),
-          }),
+        console.log("Adding comment to Firebase...")
+
+        await addDoc(collection(db, "comments"), {
+          name: userName.trim(),
+          comment: newComment.trim(),
+          likes: 0,
+          createdAt: serverTimestamp(),
         })
 
-        if (response.ok) {
-          const data = await response.json()
-          console.log(`Comment added successfully. Total: ${data.total}`)
+        console.log("Comment added successfully to Firebase!")
 
-          // Refresh all comments from server to ensure consistency
-          await loadComments()
+        // Clear form
+        setNewComment("")
+        setUserName("")
 
-          setNewComment("")
-          setUserName("")
-          setShowCommentGif(true)
-          setTimeout(() => setShowCommentGif(false), 3000)
-        } else {
-          const errorData = await response.json()
-          console.error("Failed to add comment:", errorData.error)
-          alert(`Failed to add comment: ${errorData.error}`)
-        }
+        // Show success animation
+        setShowCommentGif(true)
+        setTimeout(() => setShowCommentGif(false), 3000)
       } catch (error) {
-        console.error("Failed to add comment:", error)
-        alert("Failed to add comment. Please try again.")
+        console.error("Error adding comment:", error)
+        alert("Failed to add comment. Please check your internet connection and try again.")
       } finally {
         setIsSubmittingComment(false)
       }
     }
   }
 
-  const handleLikeComment = async (id: number) => {
+  const handleLikeComment = async (commentId: string) => {
     try {
-      const response = await fetch("/api/comments", {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ id }),
+      console.log(`Liking comment ${commentId}...`)
+
+      const commentRef = doc(db, "comments", commentId)
+      await updateDoc(commentRef, {
+        likes: increment(1),
       })
 
-      if (response.ok) {
-        const data = await response.json()
-        console.log(`Comment liked successfully. Total: ${data.total}`)
-
-        // Refresh all comments to ensure consistency
-        await loadComments()
-      } else {
-        console.error("Failed to like comment")
-        // Fallback to local update
-        const updatedComments = comments.map((comment) =>
-          comment.id === id ? { ...comment, likes: comment.likes + 1 } : comment,
-        )
-        setComments(updatedComments)
-        saveCommentsToLocal(updatedComments)
-      }
+      console.log("Comment liked successfully!")
     } catch (error) {
-      console.error("Failed to like comment:", error)
-      // Fallback to local update
-      const updatedComments = comments.map((comment) =>
-        comment.id === id ? { ...comment, likes: comment.likes + 1 } : comment,
-      )
-      setComments(updatedComments)
-      saveCommentsToLocal(updatedComments)
+      console.error("Error liking comment:", error)
+      alert("Failed to like comment. Please try again.")
     }
   }
 
@@ -433,21 +415,23 @@ export default function MTNTrollSite() {
               <Badge variant="secondary" className="animate-pulse">
                 {comments.length} complaints and counting! 📈
               </Badge>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={loadComments}
-                className="ml-auto animate-pulse"
-                disabled={isLoadingComments}
-              >
-                <RefreshCw className={`w-4 h-4 ${isLoadingComments ? "animate-spin" : ""}`} />
-                Refresh
-              </Button>
+              <div className="ml-auto flex items-center gap-2">
+                <div
+                  className={`w-2 h-2 rounded-full ${isConnected ? "bg-green-500 animate-pulse" : "bg-red-500"}`}
+                ></div>
+                <span className="text-xs text-gray-500">{isConnected ? "Live" : "Offline"}</span>
+              </div>
             </CardTitle>
             <CardDescription>
               Share your MTN horror stories with fellow sufferers. Misery loves company! 😭
               <br />
-              <span className="text-xs text-green-600">💾 Comments are saved permanently and visible to everyone!</span>
+              <div className="flex items-center gap-2 mt-2">
+                <Database className="w-4 h-4 text-green-600" />
+                <span className="text-xs text-green-600">
+                  🔥 Powered by Firebase - Real-time updates & permanent storage!
+                </span>
+              </div>
+              <span className="text-xs text-gray-500">Comments appear instantly for everyone in real-time!</span>
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -462,6 +446,7 @@ export default function MTNTrollSite() {
                   onChange={(e) => setUserName(e.target.value)}
                   className="w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-red-500 focus:border-red-500"
                   disabled={isSubmittingComment}
+                  maxLength={50}
                 />
                 <textarea
                   placeholder="Tell us your MTN nightmare... Don't hold back! 😤"
@@ -470,21 +455,25 @@ export default function MTNTrollSite() {
                   rows={3}
                   className="w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-red-500 focus:border-red-500 resize-none"
                   disabled={isSubmittingComment}
+                  maxLength={500}
                 />
-                <Button
-                  onClick={handleAddComment}
-                  className="bg-red-500 hover:bg-red-600 text-white animate-pulse hover:animate-bounce"
-                  disabled={!newComment.trim() || !userName.trim() || isSubmittingComment}
-                >
-                  {isSubmittingComment ? (
-                    <>
-                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-                      Posting...
-                    </>
-                  ) : (
-                    <>🔥 Release Your Anger!</>
-                  )}
-                </Button>
+                <div className="flex justify-between items-center">
+                  <Button
+                    onClick={handleAddComment}
+                    className="bg-red-500 hover:bg-red-600 text-white animate-pulse hover:animate-bounce"
+                    disabled={!newComment.trim() || !userName.trim() || isSubmittingComment}
+                  >
+                    {isSubmittingComment ? (
+                      <>
+                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                        Saving to Firebase...
+                      </>
+                    ) : (
+                      <>🔥 Release Your Anger!</>
+                    )}
+                  </Button>
+                  <div className="text-xs text-gray-500">{newComment.length}/500 characters</div>
+                </div>
               </div>
             </div>
 
@@ -492,7 +481,9 @@ export default function MTNTrollSite() {
             {showCommentGif && (
               <div className="mb-6 p-4 bg-green-50 rounded-lg border-2 border-green-500 animate-fade-in">
                 <div className="text-center">
-                  <h4 className="text-lg font-bold text-green-600 mb-2 animate-bounce">Comment Added! 🎉</h4>
+                  <h4 className="text-lg font-bold text-green-600 mb-2 animate-bounce">
+                    Comment Saved to Firebase! 🎉
+                  </h4>
                   <img
                     src="https://media.giphy.com/media/3o7abwbzKeaRksvVaE/giphy.gif"
                     alt="Venting anger gif"
@@ -500,7 +491,7 @@ export default function MTNTrollSite() {
                     style={{ maxHeight: "150px" }}
                   />
                   <p className="text-green-600 mt-2 animate-pulse">
-                    Your frustration has been documented for posterity! 📝
+                    Your frustration is now live for everyone to see in real-time! 📝🔥
                   </p>
                 </div>
               </div>
@@ -510,7 +501,7 @@ export default function MTNTrollSite() {
             {isLoadingComments ? (
               <div className="text-center py-8">
                 <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-red-500 mx-auto mb-4"></div>
-                <p className="text-gray-600">Loading comments... (Hopefully faster than MTN!) 🐌</p>
+                <p className="text-gray-600">Connecting to Firebase... (Still faster than MTN!) 🐌</p>
               </div>
             ) : (
               <div className="space-y-4">
@@ -557,7 +548,7 @@ export default function MTNTrollSite() {
                 🔥 Don't suffer in silence! Share your MTN pain and let the world know! 🔥
               </p>
               <p className="text-sm text-yellow-600 mt-1">
-                The more comments, the more evidence of their "excellent" service! 😏
+                Your comments appear instantly for everyone thanks to Firebase real-time magic! ⚡
               </p>
             </div>
           </CardContent>
