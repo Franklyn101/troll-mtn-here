@@ -55,17 +55,31 @@ export default function MTNTrollSite() {
   const loadComments = async () => {
     try {
       setIsLoadingComments(true)
-      const response = await fetch("/api/comments")
+      const response = await fetch("/api/comments", {
+        cache: "no-store", // Ensure we always get fresh data
+      })
       if (response.ok) {
         const data = await response.json()
         setComments(data.comments)
+        console.log(`Loaded ${data.total} comments from server`)
+      } else {
+        console.error("Failed to load comments from server")
+        // Fallback to localStorage if API fails
+        const savedComments = localStorage.getItem("mtn-comments")
+        if (savedComments) {
+          const parsed = JSON.parse(savedComments)
+          setComments(parsed)
+          console.log(`Loaded ${parsed.length} comments from localStorage`)
+        }
       }
     } catch (error) {
       console.error("Failed to load comments:", error)
       // Fallback to localStorage if API fails
       const savedComments = localStorage.getItem("mtn-comments")
       if (savedComments) {
-        setComments(JSON.parse(savedComments))
+        const parsed = JSON.parse(savedComments)
+        setComments(parsed)
+        console.log(`Loaded ${parsed.length} comments from localStorage`)
       }
     } finally {
       setIsLoadingComments(false)
@@ -135,49 +149,23 @@ export default function MTNTrollSite() {
 
         if (response.ok) {
           const data = await response.json()
-          const updatedComments = [data.comment, ...comments]
-          setComments(updatedComments)
-          saveCommentsToLocal(updatedComments)
+          console.log(`Comment added successfully. Total: ${data.total}`)
+
+          // Refresh all comments from server to ensure consistency
+          await loadComments()
+
           setNewComment("")
           setUserName("")
           setShowCommentGif(true)
           setTimeout(() => setShowCommentGif(false), 3000)
         } else {
-          // Fallback to local storage if API fails
-          const comment: Comment = {
-            id: Math.max(...comments.map((c) => c.id), 0) + 1,
-            name: userName.trim(),
-            comment: newComment.trim(),
-            timestamp: "Just now",
-            likes: 0,
-            createdAt: new Date().toISOString(),
-          }
-          const updatedComments = [comment, ...comments]
-          setComments(updatedComments)
-          saveCommentsToLocal(updatedComments)
-          setNewComment("")
-          setUserName("")
-          setShowCommentGif(true)
-          setTimeout(() => setShowCommentGif(false), 3000)
+          const errorData = await response.json()
+          console.error("Failed to add comment:", errorData.error)
+          alert(`Failed to add comment: ${errorData.error}`)
         }
       } catch (error) {
         console.error("Failed to add comment:", error)
-        // Fallback to local storage
-        const comment: Comment = {
-          id: Math.max(...comments.map((c) => c.id), 0) + 1,
-          name: userName.trim(),
-          comment: newComment.trim(),
-          timestamp: "Just now",
-          likes: 0,
-          createdAt: new Date().toISOString(),
-        }
-        const updatedComments = [comment, ...comments]
-        setComments(updatedComments)
-        saveCommentsToLocal(updatedComments)
-        setNewComment("")
-        setUserName("")
-        setShowCommentGif(true)
-        setTimeout(() => setShowCommentGif(false), 3000)
+        alert("Failed to add comment. Please try again.")
       } finally {
         setIsSubmittingComment(false)
       }
@@ -196,10 +184,12 @@ export default function MTNTrollSite() {
 
       if (response.ok) {
         const data = await response.json()
-        const updatedComments = comments.map((comment) => (comment.id === id ? data.comment : comment))
-        setComments(updatedComments)
-        saveCommentsToLocal(updatedComments)
+        console.log(`Comment liked successfully. Total: ${data.total}`)
+
+        // Refresh all comments to ensure consistency
+        await loadComments()
       } else {
+        console.error("Failed to like comment")
         // Fallback to local update
         const updatedComments = comments.map((comment) =>
           comment.id === id ? { ...comment, likes: comment.likes + 1 } : comment,
@@ -440,6 +430,9 @@ export default function MTNTrollSite() {
           <CardHeader>
             <CardTitle className="animate-slide-in-left flex items-center gap-2">
               💬 Vent Your Frustrations Here!
+              <Badge variant="secondary" className="animate-pulse">
+                {comments.length} complaints and counting! 📈
+              </Badge>
               <Button
                 variant="ghost"
                 size="sm"
